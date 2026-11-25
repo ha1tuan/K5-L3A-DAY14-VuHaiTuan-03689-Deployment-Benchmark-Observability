@@ -9,13 +9,20 @@ Tất cả config đọc từ environment variables.
 import os
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Nạp .env nếu có (ưu tiên biến môi trường hệ thống nếu đã được set)
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 
 @dataclass
 class Settings:
     # Server
-    host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
-    port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
+    host: str = field(default_factory=lambda: os.getenv("HOST") or "0.0.0.0")
+    port: int = field(default_factory=lambda: int(os.getenv("PORT") or "8000"))
     debug: bool = field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")
 
     # App

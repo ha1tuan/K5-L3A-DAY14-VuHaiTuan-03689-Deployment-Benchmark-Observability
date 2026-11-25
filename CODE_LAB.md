@@ -109,10 +109,10 @@ python app.py
 
 | Feature | Basic | Advanced | Tại sao quan trọng? |
 |---------|-------|----------|---------------------|
-| Config | Hardcode | Env vars | ... |
-| Health check |  |  | ... |
-| Logging | print() | JSON | ... |
-| Shutdown | Đột ngột | Graceful | ... |
+| Config | Hardcode | Env vars | Bảo mật secrets (không lộ API key lên Git) và dễ đổi cấu hình giữa dev/staging/prod mà không cần sửa code |
+| Health check | Không có | `/health` & `/ready` | Giúp platform/load balancer biết service còn sống hay đã sẵn sàng để tự động restart hoặc điều hướng traffic |
+| Logging | `print()` | Structured JSON | Dễ thu thập, lọc và tìm kiếm log tập trung trên production (Datadog, Loki, CloudWatch) và tránh lộ thông tin nhạy cảm |
+| Shutdown | Đột ngột | Graceful (`lifespan` + `SIGTERM`) | Cho phép các request đang xử lý hoàn thành và đóng kết nối DB/tài nguyên an toàn, tránh lỗi 5xx cho người dùng khi deploy/restart |
 
 ###  Checkpoint 1
 
@@ -145,10 +145,16 @@ cd ../../02-docker/develop
 
 **Nhiệm vụ:** Đọc `Dockerfile` và trả lời:
 
-1. Base image là gì?
-2. Working directory là gì?
-3. Tại sao COPY requirements.txt trước?
+1. Base image là nền tảng khởi đầu (khai báo qua lệnh FROM) để bạn xây dựng image mới lên trên đó. Nó chứa hệ điều hành tối giản và/hoặc runtime/môi trường sẵn có để ứng dụng của bạn chạy được.
+2. Working directory (khai báo qua lệnh WORKDIR) là thư mục làm việc mặc định bên trong container cho các lệnh tiếp theo như RUN, CMD, ENTRYPOINT, COPY, ADD.
+3. Tại sao COPY requirements.txt trước? Để tận dụng Docker layer caching. Nếu dependencies không đổi, Docker chỉ build lại layer này mà không cần chạy lại pip install, giúp build nhanh hơn đáng kể.
 4. CMD vs ENTRYPOINT khác nhau thế nào?
+
+| Tiêu chí | CMD | ENTRYPOINT |
+|----------|-----|------------|
+| Vai trò chính | Đặt lệnh mặc định hoặc tham số mặc định (dễ bị ghi đè). | Đặt chương trình/executable chính của container (khó ghi đè hơn, cần `--entrypoint`). |
+| Khi truyền thêm đối số lúc `docker run <image> <args>` | `<args>` sẽ ghi đè hoàn toàn lên `CMD`. | `<args>` sẽ được nối thêm vào sau `ENTRYPOINT` (hoạt động như tham số truyền vào). |
+| Khi kết hợp cả hai | `ENTRYPOINT` là lệnh chính, `CMD` cung cấp tham số mặc định cho lệnh đó. | Phối hợp rất tốt cho CLI tool hoặc service có cờ mặc định. |
 
 ###  Exercise 2.2: Build và run
 
@@ -177,13 +183,23 @@ cd ../production
 ```
 
 **Nhiệm vụ:** Đọc `Dockerfile` và tìm:
-- Stage 1 làm gì?
-- Stage 2 làm gì?
-- Tại sao image nhỏ hơn?
+- **Stage 1 làm gì?**
+  - Dùng base image `python:3.11-slim AS builder` để làm môi trường build.
+  - Cài đặt các build tools (`gcc`, `libpq-dev`) và xóa apt cache (`/var/lib/apt/lists/*`).
+  - Copy `02-docker/production/requirements.txt` và cài toàn bộ Python dependencies vào `/root/.local` bằng `pip install --no-cache-dir --user`. Image của stage này không dùng để deploy.
+- **Stage 2 làm gì?**
+  - Dùng base image `python:3.11-slim AS runtime` sạch để chạy ứng dụng.
+  - Tạo non-root user `appuser` (security best practice) và chuyển sang `USER appuser`.
+  - Copy các Python packages đã cài từ stage `builder` (`COPY --from=builder /root/.local /home/appuser/.local`) cùng source code (`main.py`, `utils/mock_llm.py`).
+  - Cấu hình `PATH`, `PYTHONPATH`, `EXPOSE 8000`, `HEALTHCHECK` kiểm tra `/health`, và chạy server bằng `CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]`.
+- **Tại sao image nhỏ hơn?**
+  - Sử dụng base image `python:3.11-slim` gọn nhẹ thay vì bản full `python:3.11` (~1 GB) ở bản develop.
+  - Chỉ copy kết quả đã build (`/root/.local`) và source code sang Stage 2, loại bỏ hoàn toàn trình biên dịch (`gcc`), thư viện dev (`libpq-dev`) và các file trung gian của Stage 1 khỏi image cuối cùng.
 
-Build và so sánh:
+Build và so sánh (chạy từ thư mục gốc của project):
 ```bash
-docker build -t my-agent:advanced .
+cd ../..
+docker build -f 02-docker/production/Dockerfile -t my-agent:advanced .
 docker images | grep my-agent
 ```
 
