@@ -357,8 +357,14 @@ cd ../../04-api-gateway/develop
 
 **Nhiệm vụ:** Đọc `app.py` và tìm:
 - API key được check ở đâu?
+  - Biến môi trường `AGENT_API_KEY` (mặc định `"demo-key-change-in-production"`) được đọc ở dòng 35, và header `X-API-Key` được lấy qua `APIKeyHeader(name="X-API-Key", auto_error=False)` ở dòng 36.
+  - Logic kiểm tra nằm trong hàm dependency `verify_api_key` (dòng 39–54) và được gắn vào endpoint `POST /ask` qua `_key: str = Depends(verify_api_key)` (dòng 70). Các endpoint `/` và `/health` là public.
 - Điều gì xảy ra nếu sai key?
+  - Thiếu header `X-API-Key`: trả về HTTP **401** (`"Missing API key. Include header: X-API-Key: <your-key>"`).
+  - Sai key (`api_key != API_KEY`): trả về HTTP **403** (`"Invalid API key."`).
 - Làm sao rotate key?
+  - Với code hiện tại (`API_KEY` đọc 1 lần khi startup và chỉ nhận 1 key): cập nhật biến môi trường `AGENT_API_KEY` rồi restart/redeploy service (sẽ làm gián đoạn client dùng key cũ).
+  - Để rotate không downtime: sửa code hỗ trợ danh sách nhiều key hợp lệ (vd: `AGENT_API_KEYS` phân tách bằng dấu phẩy, check `api_key in VALID_KEYS`), thêm key mới trước, chuyển client sang key mới rồi mới xóa key cũ.
 
 Test:
 ```bash
@@ -406,8 +412,13 @@ curl http://localhost:8000/ask -X POST \
 
 **Nhiệm vụ:** Đọc `rate_limiter.py` và trả lời:
 - Algorithm nào được dùng? (Token bucket? Sliding window?)
+  - **Sliding Window** (docstring ghi *Sliding Window Counter*, cài đặt dùng `collections.deque` lưu timestamp của từng request theo `user_id` ở dòng 26–41; mỗi lần `check()` sẽ `popleft()` các timestamp cũ hơn `now - window_seconds`).
 - Limit là bao nhiêu requests/minute?
+  - User thường (`rate_limiter_user`): **10 requests/phút** (`max_requests=10, window_seconds=60`).
+  - Admin (`rate_limiter_admin`): **100 requests/phút** (`max_requests=100, window_seconds=60`).
 - Làm sao bypass limit cho admin?
+  - Hiện tại trong `app.py` (dòng 141–142), admin không bypass hoàn toàn mà được nâng lên `rate_limiter_admin` (100 req/phút) khi `role == "admin"`.
+  - Để admin bypass hoàn toàn, chỉ cần bỏ qua `limiter.check(username)` khi `role == "admin"` (vd: `if role != "admin": rate_info = rate_limiter_user.check(username)`).
 
 Test:
 ```bash
@@ -428,6 +439,11 @@ Quan sát response khi hit limit.
 **Nhiệm vụ:** Đọc `cost_guard.py` và implement logic:
 
 ```python
+from datetime import datetime
+import redis
+
+r = redis.Redis()
+
 def check_budget(user_id: str, estimated_cost: float) -> bool:
     """
     Return True nếu còn budget, False nếu vượt.
@@ -437,8 +453,16 @@ def check_budget(user_id: str, estimated_cost: float) -> bool:
     - Track spending trong Redis
     - Reset đầu tháng
     """
-    # TODO: Implement
-    pass
+    month_key = datetime.now().strftime("%Y-%m")
+    key = f"budget:{user_id}:{month_key}"
+
+    current_spending = float(r.get(key) or 0.0)
+    if current_spending + estimated_cost > 10.0:
+        return False
+
+    r.incrbyfloat(key, estimated_cost)
+    r.expire(key, 32 * 24 * 3600)
+    return True
 ```
 
 <details>
@@ -495,18 +519,25 @@ cd ../../05-scaling-reliability/develop
 **Nhiệm vụ:** Implement 2 endpoints:
 
 ```python
+from fastapi.responses import JSONResponse
+
 @app.get("/health")
 def health():
     """Liveness probe — container còn sống không?"""
-    # TODO: Return 200 nếu process OK
-    pass
+    return {"status": "ok"}
 
 @app.get("/ready")
 def ready():
     """Readiness probe — sẵn sàng nhận traffic không?"""
-    # TODO: Check database connection, Redis, etc.
-    # Return 200 nếu OK, 503 nếu chưa ready
-    pass
+    try:
+        r.ping()
+        db.execute("SELECT 1")
+        return {"status": "ready"}
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "detail": str(e)},
+        )
 ```
 
 <details>
@@ -541,15 +572,28 @@ def ready():
 ```python
 import signal
 import sys
+import threading
+
+shutting_down = False
+in_flight_requests = 0
+lock = threading.Lock()
 
 def shutdown_handler(signum, frame):
     """Handle SIGTERM from container orchestrator"""
-    # TODO:
-    # 1. Stop accepting new requests
-    # 2. Finish current requests
-    # 3. Close connections
+    global shutting_down
+    # 1. Stop accepting new requests (/ready trả về 503, middleware reject request mới)
+    shutting_down = True
+
+    # 2. Finish current requests (đợi các request đang xử lý hoàn tất)
+    while in_flight_requests > 0:
+        time.sleep(0.1)
+
+    # 3. Close connections (đóng Redis, DB, HTTP clients)
+    r.close()
+    db.close()
+
     # 4. Exit
-    pass
+    sys.exit(0)
 
 signal.signal(signal.SIGTERM, shutdown_handler)
 ```
